@@ -894,7 +894,10 @@ def tab_chatbot(model_key: str):
             st.session_state.chat_total_input_tokens  += in_tok
             st.session_state.chat_total_output_tokens += out_tok
             st.session_state.chat_total_cost          += cost
-            st.session_state.chat_per_turn.append({"input": in_tok, "output": out_tok, "cost": cost})
+            st.session_state.chat_per_turn.append({
+                "input": in_tok, "output": out_tok, "cost": cost,
+                "model": model_key,  # record which model was used for this turn
+            })
 
             with st.expander("Token details", expanded=True):
                 cc1, cc2, cc3 = st.columns(3)
@@ -1153,36 +1156,38 @@ def tab_session_cost():
 
     rows = []
 
-    # Code Writer line items
-    cw_model_label = LIVE_MODELS.get(cw_model, {}).get("label", cw_model)
-    cw_pricing     = MODEL_PRICING.get(cw_model, {"input": 0, "output": 0})
+    # Code Writer line items — model_key stored per-turn in done dict
+    cw_pricing = MODEL_PRICING.get(cw_model, {"input": 0, "output": 0})
     for i, t in enumerate(cw_turns, 1):
+        turn_model     = t.get("model_key", cw_model)
+        turn_label     = LIVE_MODELS.get(turn_model, {}).get("label", turn_model)
         rows.append({
-            "Tab":      "💻 Code Writer",
-            "Turn":     i,
-            "Model":    cw_model_label,
-            "Input tok":    t.get("input_tokens", 0),
-            "Output tok":   t.get("output_tokens", 0),
-            "Reasoning tok":t.get("thinking_tokens", 0),
-            "Tool tok":     t.get("tool_tokens", 0),
-            "Total tok":    (t.get("input_tokens", 0) + t.get("output_tokens", 0)
-                             + t.get("thinking_tokens", 0) + t.get("tool_tokens", 0)),
-            "Cost":         t.get("total_cost", 0.0),
+            "Tab":           "💻 Code Writer",
+            "Turn":          i,
+            "Model":         turn_label,
+            "Input tok":     t.get("input_tokens", 0),
+            "Output tok":    t.get("output_tokens", 0),
+            "Reasoning tok": t.get("thinking_tokens", 0),
+            "Tool tok":      t.get("tool_tokens", 0),
+            "Total tok":     (t.get("input_tokens", 0) + t.get("output_tokens", 0)
+                              + t.get("thinking_tokens", 0) + t.get("tool_tokens", 0)),
+            "Cost":          t.get("total_cost", 0.0),
         })
 
-    # Chatbot line items
-    chat_model_label = LIVE_MODELS.get(chat_model, {}).get("label", chat_model)
+    # Chatbot line items — model stored per-turn since this fix
     for i, t in enumerate(chat_turns, 1):
+        turn_model  = t.get("model", chat_model)   # falls back for old turns
+        turn_label  = LIVE_MODELS.get(turn_model, {}).get("label", turn_model)
         rows.append({
-            "Tab":      "💬 Chatbot",
-            "Turn":     i,
-            "Model":    chat_model_label,
-            "Input tok":    t.get("input", 0),
-            "Output tok":   t.get("output", 0),
-            "Reasoning tok":0,
-            "Tool tok":     0,
-            "Total tok":    t.get("input", 0) + t.get("output", 0),
-            "Cost":         t.get("cost", 0.0),
+            "Tab":           "💬 Chatbot",
+            "Turn":          i,
+            "Model":         turn_label,
+            "Input tok":     t.get("input", 0),
+            "Output tok":    t.get("output", 0),
+            "Reasoning tok": 0,
+            "Tool tok":      0,
+            "Total tok":     t.get("input", 0) + t.get("output", 0),
+            "Cost":          t.get("cost", 0.0),
         })
 
     if rows:

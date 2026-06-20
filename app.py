@@ -302,11 +302,10 @@ MOCK_TOOL_RESPONSES = {
 }
 
 
-def stream_anthropic(model_key: str, task: str):
+def stream_anthropic(model_key: str, messages: list):
     """Stream from Anthropic with adaptive thinking + MCP tools."""
     client = get_anthropic_client()
     info = LIVE_MODELS[model_key]
-    messages = [{"role": "user", "content": task}]
 
     pre = client.messages.count_tokens(
         model=model_key,
@@ -320,7 +319,7 @@ def stream_anthropic(model_key: str, task: str):
         model=model_key,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
-        messages=messages,
+        messages=messages,   # full conversation history
     )
     if info["supports_tools"]:
         kwargs["tools"] = MOCK_MCP_TOOLS_ANTHROPIC
@@ -371,7 +370,7 @@ def stream_anthropic(model_key: str, task: str):
     }
 
 
-def stream_openai_compat(model_key: str, task: str):
+def stream_openai_compat(model_key: str, messages: list):
     """Stream from OpenAI-compatible endpoint (Gemini, Groq/Mistral, Groq/Llama)."""
     client = get_openai_compat_client(model_key)
     info = LIVE_MODELS[model_key]
@@ -381,10 +380,7 @@ def stream_openai_compat(model_key: str, task: str):
         model=api_model,
         max_tokens=4096,
         stream=True,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": task},
-        ],
+        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
     )
     if info["supports_tools"]:
         kwargs["tools"] = MOCK_MCP_TOOLS_OPENAI
@@ -437,12 +433,12 @@ def stream_openai_compat(model_key: str, task: str):
     }
 
 
-def run_code_writer(model_key: str, task: str):
+def run_code_writer(model_key: str, messages: list):
     info = LIVE_MODELS[model_key]
     if info["sdk"] == "anthropic":
-        yield from stream_anthropic(model_key, task)
+        yield from stream_anthropic(model_key, messages)
     else:
-        yield from stream_openai_compat(model_key, task)
+        yield from stream_openai_compat(model_key, messages)
 
 
 def chat_stream_anthropic(model_key: str, messages: list) -> tuple[str, int, int]:
@@ -646,66 +642,113 @@ def tab_code_writer(model_key: str):
     )
 
     if not ok:
-        st.error(
-            f"❌ `{info['key_env']}` is not set. Add it to your `.env` file to use this model.",
-            icon="🔑",
-        )
+        st.error(f"❌ `{info['key_env']}` is not set. Add it to your `.env` file.", icon="🔑")
         return
 
-    if "cw_cumulative_cost" not in st.session_state:
-        st.session_state.cw_cumulative_cost = 0.0
-        st.session_state.cw_iterations = 0
-        st.session_state.cw_history = []
+    ctx_window = info["context_window"]
 
-    task = st.text_area(
-        "Describe your coding task",
-        placeholder="e.g. Write a Python function that reads a CSV, groups by a column and plots a bar chart",
-        height=120,
+    # Session state init — reset if model changed
+    if ("cw_messages" not in st.session_state
+            or st.session_state.get("cw_model_key") != model_key):
+        st.session_state.cw_messages = []       # full conversation history
+        st.session_state.cw_turn_data = []      # receipt data per turn
+        st.session_state.cw_cumulative_cost = 0.0
+        st.session_state.cw_model_key = model_key
+
+    # ── Sidebar: context window progress ─────────────────────────────────────
+    total_ctx_tokens = 0
+    if st.session_state.cw_messages:
+        if info["sdk"] == "anthropic":
+            total_ctx_tokens = count_tokens_anthropic(model_key, st.session_state.cw_messages)
+        else:
+            total_ctx_tokens = sum(len(m["content"].split()) * 2
+                                   for m in st.session_state.cw_messages)
+
+    pct = min(total_ctx_tokens / ctx_window, 1.0)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📐 Code Writer Context")
+    count_label = "exact" if info["sdk"] == "anthropic" else "estimated"
+    st.sidebar.caption(f"Token count: {count_label}")
+    st.sidebar.progress(pct)
+    st.sidebar.write(f"**{total_ctx_tokens:,}** / **{ctx_window:,}** ({pct*100:.1f}%)")
+    if pct >= 0.9:
+        st.sidebar.error("🚨 Context nearly full — clear history!")
+    elif pct >= 0.7:
+        st.sidebar.warning("⚠️ Context 70%+ full.")
+
+    st.sidebar.markdown("### 💰 Session Cost")
+    st.sidebar.metric("Total Cost", fmt_cost(st.session_state.cw_cumulative_cost))
+    st.sidebar.metric("Turns", len(st.session_state.cw_turn_data))
+
+    if st.sidebar.button("🗑️ Clear Code Writer"):
+        st.session_state.cw_messages = []
+        st.session_state.cw_turn_data = []
+        st.session_state.cw_cumulative_cost = 0.0
+        st.rerun()
+
+    # ── Render conversation history ───────────────────────────────────────────
+    for i, msg in enumerate(st.session_state.cw_messages):
+        role_label = "🧑 You" if msg["role"] == "user" else f"🤖 {info['label']}"
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                turn_idx = i // 2
+                if turn_idx < len(st.session_state.cw_turn_data):
+                    t = st.session_state.cw_turn_data[turn_idx]
+                    with st.expander("🧾 Receipt for this turn", expanded=False):
+                        render_receipt(t, turn_idx + 1,
+                                       sum(x["total_cost"] for x in st.session_state.cw_turn_data[:turn_idx+1]),
+                                       info)
+
+    # ── Input ─────────────────────────────────────────────────────────────────
+    placeholder_text = (
+        "Describe your coding task…" if not st.session_state.cw_messages
+        else "Follow up — e.g. 'make it async', 'add error handling', 'write tests'…"
     )
 
-    col_btn, col_reset = st.columns([1, 5])
-    with col_btn:
-        run = st.button("✨ Generate Code", type="primary", disabled=not task.strip())
-    with col_reset:
-        if st.button("🔄 Reset History"):
-            st.session_state.cw_cumulative_cost = 0.0
-            st.session_state.cw_iterations = 0
-            st.session_state.cw_history = []
-            st.rerun()
+    if prompt := st.chat_input(placeholder_text):
+        st.session_state.cw_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    if run and task.strip():
-        st.session_state.cw_iterations += 1
-        status_ph = st.empty()
-        code_ph = st.empty()
-        final_data = None
-        collected = ""
+        with st.chat_message("assistant"):
+            status_ph = st.empty()
+            code_ph = st.empty()
+            collected = ""
+            final_data = None
 
-        for chunk in run_code_writer(model_key, task):
-            if chunk["type"] == "status":
-                status_ph.info(chunk["text"])
-            elif chunk["type"] == "text_chunk":
-                collected += chunk["text"]
-                code_ph.code(collected, language="python")
-            elif chunk["type"] == "done":
-                final_data = chunk
+            for chunk in run_code_writer(model_key, st.session_state.cw_messages):
+                if chunk["type"] == "status":
+                    status_ph.info(chunk["text"])
+                elif chunk["type"] == "text_chunk":
+                    collected += chunk["text"]
+                    code_ph.markdown(collected + "▌")
+                elif chunk["type"] == "done":
+                    final_data = chunk
 
-        status_ph.empty()
+            status_ph.empty()
+            code_ph.markdown(collected)
 
-        if final_data:
-            st.session_state.cw_cumulative_cost += final_data["total_cost"]
-            st.session_state.cw_history.append(final_data)
+            if final_data:
+                st.session_state.cw_messages.append({"role": "assistant", "content": collected})
+                st.session_state.cw_cumulative_cost += final_data["total_cost"]
+                st.session_state.cw_turn_data.append(final_data)
 
-            render_receipt(final_data, st.session_state.cw_iterations,
-                           st.session_state.cw_cumulative_cost, info)
+                with st.expander("🧾 Receipt for this turn", expanded=True):
+                    render_receipt(final_data, len(st.session_state.cw_turn_data),
+                                   st.session_state.cw_cumulative_cost, info)
 
-            if len(st.session_state.cw_history) > 1:
-                st.markdown("### 📈 Cumulative Cost Over Iterations")
-                cum, running = [], 0.0
-                for i, h in enumerate(st.session_state.cw_history, 1):
-                    running += h["total_cost"]
-                    cum.append({"Iteration": i, "Cumulative Cost ($)": running})
-                fig3 = px.line(pd.DataFrame(cum), x="Iteration", y="Cumulative Cost ($)", markers=True)
-                st.plotly_chart(fig3, use_container_width=True)
+        st.rerun()
+
+    # ── Cumulative cost chart ─────────────────────────────────────────────────
+    if len(st.session_state.cw_turn_data) > 1:
+        st.markdown("### 📈 Cumulative Cost Over Turns")
+        cum, running = [], 0.0
+        for i, h in enumerate(st.session_state.cw_turn_data, 1):
+            running += h["total_cost"]
+            cum.append({"Turn": i, "Cumulative Cost ($)": running})
+        fig3 = px.line(pd.DataFrame(cum), x="Turn", y="Cumulative Cost ($)", markers=True)
+        st.plotly_chart(fig3, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

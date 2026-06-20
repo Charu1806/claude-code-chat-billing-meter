@@ -253,6 +253,71 @@ def render_model_selector() -> str:
     ctx = info["context_window"]
     st.sidebar.write(f"📐 Context: **{ctx:,}** tokens")
 
+    # ── Live session stats for both tabs ─────────────────────────────────────
+    st.sidebar.markdown("---")
+
+    def _ctx_bar(label: str, used: int, window: int, cost: float, turns: int, sdk: str):
+        pct = min(used / window, 1.0) if window else 0
+        st.sidebar.markdown(f"### {label}")
+        st.sidebar.caption(f"Token count: {'exact' if sdk == 'anthropic' else 'estimated'}")
+        st.sidebar.progress(pct)
+        st.sidebar.write(f"**{used:,}** / **{window:,}** ({pct*100:.1f}%)")
+        if pct >= 0.9:
+            st.sidebar.error("🚨 Nearly full!")
+        elif pct >= 0.7:
+            st.sidebar.warning("⚠️ 70%+ full")
+        c1, c2 = st.sidebar.columns(2)
+        c1.metric("Cost", fmt_cost(cost))
+        c2.metric("Turns", turns)
+
+    # Tab 1 — Code Writer stats
+    cw_msgs   = st.session_state.get("cw_messages", [])
+    cw_model  = st.session_state.get("cw_model_key", selected_key)
+    cw_sdk    = LIVE_MODELS.get(cw_model, {}).get("sdk", "anthropic")
+    cw_window = LIVE_MODELS.get(cw_model, {}).get("context_window", 1)
+    if cw_msgs:
+        cw_used = (count_tokens_anthropic(cw_model, cw_msgs)
+                   if cw_sdk == "anthropic"
+                   else sum(len(m["content"].split()) * 2 for m in cw_msgs))
+    else:
+        cw_used = 0
+    _ctx_bar("💻 Code Writer Context", cw_used, cw_window,
+             st.session_state.get("cw_cumulative_cost", 0.0),
+             len(st.session_state.get("cw_turn_data", [])),
+             cw_sdk)
+
+    if st.sidebar.button("🗑️ Clear Code Writer", key="sb_clear_cw"):
+        st.session_state.cw_messages = []
+        st.session_state.cw_turn_data = []
+        st.session_state.cw_cumulative_cost = 0.0
+        st.rerun()
+
+    st.sidebar.markdown("---")
+
+    # Tab 2 — Chatbot stats
+    chat_msgs   = st.session_state.get("chat_messages", [])
+    chat_model  = st.session_state.get("chat_model_key", selected_key)
+    chat_sdk    = LIVE_MODELS.get(chat_model, {}).get("sdk", "anthropic")
+    chat_window = LIVE_MODELS.get(chat_model, {}).get("context_window", 1)
+    if chat_msgs:
+        chat_used = (count_tokens_anthropic(chat_model, chat_msgs)
+                     if chat_sdk == "anthropic"
+                     else sum(len(m["content"].split()) * 2 for m in chat_msgs))
+    else:
+        chat_used = 0
+    _ctx_bar("💬 Chatbot Context", chat_used, chat_window,
+             st.session_state.get("chat_total_cost", 0.0),
+             len(st.session_state.get("chat_per_turn", [])),
+             chat_sdk)
+
+    if st.sidebar.button("🗑️ Clear Chatbot", key="sb_clear_chat"):
+        st.session_state.chat_messages = []
+        st.session_state.chat_total_input_tokens = 0
+        st.session_state.chat_total_output_tokens = 0
+        st.session_state.chat_total_cost = 0.0
+        st.session_state.chat_per_turn = []
+        st.rerun()
+
     return selected_key
 
 
@@ -645,46 +710,13 @@ def tab_code_writer(model_key: str):
         st.error(f"❌ `{info['key_env']}` is not set. Add it to your `.env` file.", icon="🔑")
         return
 
-    ctx_window = info["context_window"]
-
     # Session state init — reset if model changed
     if ("cw_messages" not in st.session_state
             or st.session_state.get("cw_model_key") != model_key):
-        st.session_state.cw_messages = []       # full conversation history
-        st.session_state.cw_turn_data = []      # receipt data per turn
-        st.session_state.cw_cumulative_cost = 0.0
-        st.session_state.cw_model_key = model_key
-
-    # ── Sidebar: context window progress ─────────────────────────────────────
-    total_ctx_tokens = 0
-    if st.session_state.cw_messages:
-        if info["sdk"] == "anthropic":
-            total_ctx_tokens = count_tokens_anthropic(model_key, st.session_state.cw_messages)
-        else:
-            total_ctx_tokens = sum(len(m["content"].split()) * 2
-                                   for m in st.session_state.cw_messages)
-
-    pct = min(total_ctx_tokens / ctx_window, 1.0)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📐 Code Writer Context")
-    count_label = "exact" if info["sdk"] == "anthropic" else "estimated"
-    st.sidebar.caption(f"Token count: {count_label}")
-    st.sidebar.progress(pct)
-    st.sidebar.write(f"**{total_ctx_tokens:,}** / **{ctx_window:,}** ({pct*100:.1f}%)")
-    if pct >= 0.9:
-        st.sidebar.error("🚨 Context nearly full — clear history!")
-    elif pct >= 0.7:
-        st.sidebar.warning("⚠️ Context 70%+ full.")
-
-    st.sidebar.markdown("### 💰 Session Cost")
-    st.sidebar.metric("Total Cost", fmt_cost(st.session_state.cw_cumulative_cost))
-    st.sidebar.metric("Turns", len(st.session_state.cw_turn_data))
-
-    if st.sidebar.button("🗑️ Clear Code Writer"):
         st.session_state.cw_messages = []
         st.session_state.cw_turn_data = []
         st.session_state.cw_cumulative_cost = 0.0
-        st.rerun()
+        st.session_state.cw_model_key = model_key
 
     # ── Render conversation history ───────────────────────────────────────────
     for i, msg in enumerate(st.session_state.cw_messages):
@@ -783,42 +815,6 @@ def tab_chatbot(model_key: str):
         st.session_state.chat_total_cost = 0.0
         st.session_state.chat_per_turn = []
         st.session_state.chat_model_key = model_key
-
-    # Token count for context bar — exact for Anthropic, estimated for others
-    total_conv_tokens = 0
-    if st.session_state.chat_messages:
-        if info["sdk"] == "anthropic":
-            total_conv_tokens = count_tokens_anthropic(model_key, st.session_state.chat_messages)
-        else:
-            total_conv_tokens = sum(
-                len(m["content"].split()) * 2 for m in st.session_state.chat_messages
-            )
-
-    pct = min(total_conv_tokens / ctx_window, 1.0)
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 Context Window")
-    count_label = "exact (Anthropic API)" if info["sdk"] == "anthropic" else "estimated"
-    st.sidebar.caption(f"Token count: {count_label}")
-    st.sidebar.progress(pct)
-    st.sidebar.write(f"**{total_conv_tokens:,}** / **{ctx_window:,}** ({pct*100:.1f}%)")
-    if pct >= 0.9:
-        st.sidebar.error("🚨 Context window nearly full!")
-    elif pct >= 0.7:
-        st.sidebar.warning("⚠️ Context 70%+ full — costs rising.")
-
-    st.sidebar.markdown("### 💰 Conversation Cost")
-    st.sidebar.metric("Total Cost",          fmt_cost(st.session_state.chat_total_cost))
-    st.sidebar.metric("Total Input Tokens",  f"{st.session_state.chat_total_input_tokens:,}")
-    st.sidebar.metric("Total Output Tokens", f"{st.session_state.chat_total_output_tokens:,}")
-
-    if st.sidebar.button("🗑️ Clear Conversation"):
-        st.session_state.chat_messages = []
-        st.session_state.chat_total_input_tokens = 0
-        st.session_state.chat_total_output_tokens = 0
-        st.session_state.chat_total_cost = 0.0
-        st.session_state.chat_per_turn = []
-        st.rerun()
 
     for i, msg in enumerate(st.session_state.chat_messages):
         with st.chat_message(msg["role"]):

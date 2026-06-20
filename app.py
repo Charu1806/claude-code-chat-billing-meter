@@ -1109,6 +1109,191 @@ def tab_reference():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — Session Cost Receipt
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tab_session_cost():
+    import datetime
+    st.header("🧾 Session Cost Receipt")
+    st.caption("Everything spent in this browser session — across all models, both tabs.")
+
+    # ── Gather data from session state ────────────────────────────────────────
+    cw_turns    = st.session_state.get("cw_turn_data", [])
+    cw_model    = st.session_state.get("cw_model_key", "—")
+    cw_cost     = st.session_state.get("cw_cumulative_cost", 0.0)
+
+    chat_turns  = st.session_state.get("chat_per_turn", [])
+    chat_model  = st.session_state.get("chat_model_key", "—")
+    chat_cost   = st.session_state.get("chat_total_cost", 0.0)
+    chat_in     = st.session_state.get("chat_total_input_tokens", 0)
+    chat_out    = st.session_state.get("chat_total_output_tokens", 0)
+
+    total_cost  = cw_cost + chat_cost
+
+    cw_in    = sum(t.get("input_tokens", 0)    for t in cw_turns)
+    cw_out   = sum(t.get("output_tokens", 0)   for t in cw_turns)
+    cw_think = sum(t.get("thinking_tokens", 0) for t in cw_turns)
+    cw_tool  = sum(t.get("tool_tokens", 0)     for t in cw_turns)
+
+    # ── Top summary metrics ───────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Total Session Cost", fmt_cost(total_cost))
+    c2.metric("💻 Code Writer Cost",   fmt_cost(cw_cost),   help=f"{len(cw_turns)} turns")
+    c3.metric("💬 Chatbot Cost",       fmt_cost(chat_cost), help=f"{len(chat_turns)} turns")
+    c4.metric("🔁 Total Turns",        len(cw_turns) + len(chat_turns))
+
+    if total_cost == 0:
+        st.info("No API calls made yet this session. Use Tab 1 or Tab 2 to start chatting.", icon="💡")
+        return
+
+    st.markdown("---")
+
+    # ── Itemised receipt ──────────────────────────────────────────────────────
+    st.markdown("### 📋 Itemised Receipt")
+
+    rows = []
+
+    # Code Writer line items
+    cw_model_label = LIVE_MODELS.get(cw_model, {}).get("label", cw_model)
+    cw_pricing     = MODEL_PRICING.get(cw_model, {"input": 0, "output": 0})
+    for i, t in enumerate(cw_turns, 1):
+        rows.append({
+            "Tab":      "💻 Code Writer",
+            "Turn":     i,
+            "Model":    cw_model_label,
+            "Input tok":    t.get("input_tokens", 0),
+            "Output tok":   t.get("output_tokens", 0),
+            "Reasoning tok":t.get("thinking_tokens", 0),
+            "Tool tok":     t.get("tool_tokens", 0),
+            "Total tok":    (t.get("input_tokens", 0) + t.get("output_tokens", 0)
+                             + t.get("thinking_tokens", 0) + t.get("tool_tokens", 0)),
+            "Cost":         t.get("total_cost", 0.0),
+        })
+
+    # Chatbot line items
+    chat_model_label = LIVE_MODELS.get(chat_model, {}).get("label", chat_model)
+    for i, t in enumerate(chat_turns, 1):
+        rows.append({
+            "Tab":      "💬 Chatbot",
+            "Turn":     i,
+            "Model":    chat_model_label,
+            "Input tok":    t.get("input", 0),
+            "Output tok":   t.get("output", 0),
+            "Reasoning tok":0,
+            "Tool tok":     0,
+            "Total tok":    t.get("input", 0) + t.get("output", 0),
+            "Cost":         t.get("cost", 0.0),
+        })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df["Cost ($)"] = df["Cost"].apply(fmt_cost)
+        st.dataframe(
+            df[["Tab","Turn","Model","Input tok","Output tok","Reasoning tok","Tool tok","Total tok","Cost ($)"]],
+            use_container_width=True, hide_index=True,
+        )
+
+    st.markdown("---")
+
+    # ── Summary by model ─────────────────────────────────────────────────────
+    st.markdown("### 🤖 Cost by Model")
+    model_summary = {}
+    for r in rows:
+        m = r["Model"]
+        if m not in model_summary:
+            model_summary[m] = {"turns": 0, "tokens": 0, "cost": 0.0}
+        model_summary[m]["turns"]  += 1
+        model_summary[m]["tokens"] += r["Total tok"]
+        model_summary[m]["cost"]   += r["Cost"]
+
+    summary_rows = [
+        {"Model": m, "Turns": v["turns"], "Total Tokens": f"{v['tokens']:,}",
+         "Total Cost": fmt_cost(v["cost"]),
+         "Avg Cost/Turn": fmt_cost(v["cost"] / v["turns"] if v["turns"] else 0)}
+        for m, v in model_summary.items()
+    ]
+    st.dataframe(pd.DataFrame(summary_rows).set_index("Model"), use_container_width=True)
+
+    # ── Cost breakdown charts ─────────────────────────────────────────────────
+    st.markdown("### 📊 Breakdown Charts")
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        if len(model_summary) > 0:
+            fig = px.pie(
+                names=list(model_summary.keys()),
+                values=[v["cost"] for v in model_summary.values()],
+                title="Cost Split by Model",
+                color=list(model_summary.keys()),
+            )
+            fig.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col_b:
+        tab_summary = {"💻 Code Writer": cw_cost, "💬 Chatbot": chat_cost}
+        fig2 = px.bar(
+            x=list(tab_summary.keys()),
+            y=list(tab_summary.values()),
+            title="Cost by Tab",
+            labels={"x": "Tab", "y": "Cost ($)"},
+            color=list(tab_summary.keys()),
+            color_discrete_sequence=["#e07b39", "#4285F4"],
+            text_auto=".4f",
+        )
+        fig2.update_layout(showlegend=False)
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Token category breakdown ──────────────────────────────────────────────
+    if cw_turns:
+        st.markdown("### 🔬 Code Writer Token Categories (all turns)")
+        total_toks = cw_in + cw_out + cw_think + cw_tool
+        cat_df = pd.DataFrame({
+            "Category": ["📥 Input", "📤 Output", "🧠 Reasoning", "🔧 Tool Use"],
+            "Tokens":   [cw_in, cw_out, cw_think, cw_tool],
+            "Cost ($)": [
+                fmt_cost(token_cost(cw_in,    cw_pricing["input"])),
+                fmt_cost(token_cost(cw_out,   cw_pricing["output"])),
+                fmt_cost(token_cost(cw_think, cw_pricing["input"])),
+                fmt_cost(token_cost(cw_tool,  cw_pricing["input"])),
+            ],
+            "% of tokens": [f"{t/total_toks*100:.1f}%" if total_toks else "0%"
+                            for t in [cw_in, cw_out, cw_think, cw_tool]],
+        })
+        st.dataframe(cat_df.set_index("Category"), use_container_width=True)
+
+    # ── Cost over time ────────────────────────────────────────────────────────
+    if len(rows) > 1:
+        st.markdown("### 📈 Cumulative Cost Over All Turns")
+        running, timeline = 0.0, []
+        for r in rows:
+            running += r["Cost"]
+            timeline.append({
+                "Turn": f"{r['Tab']} T{r['Turn']}",
+                "Cumulative Cost ($)": running,
+                "Tab": r["Tab"],
+            })
+        fig3 = px.line(pd.DataFrame(timeline), x="Turn", y="Cumulative Cost ($)",
+                       color="Tab", markers=True,
+                       color_discrete_map={"💻 Code Writer": "#e07b39", "💬 Chatbot": "#4285F4"})
+        fig3.update_layout(xaxis_tickangle=-30)
+        st.plotly_chart(fig3, use_container_width=True)
+
+    # ── Session footer ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.caption(
+        f"Session started: this browser tab opened &nbsp;·&nbsp; "
+        f"Data resets if you refresh the page &nbsp;·&nbsp; "
+        f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    if st.button("🗑️ Clear All Session Data", type="secondary"):
+        for key in ["cw_messages","cw_turn_data","cw_cumulative_cost","cw_model_key",
+                    "chat_messages","chat_total_input_tokens","chat_total_output_tokens",
+                    "chat_total_cost","chat_per_turn","chat_model_key"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1158,12 +1343,13 @@ def main():
         ]
         st.dataframe(pd.DataFrame(dash_data).set_index("Tab"), use_container_width=True)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "💻 Code Writer (MCP)",
         "💬 Chatbot + Context",
         "🏢 Enterprise Calculator",
         "🔍 RAG vs Plain LLM",
         "📖 Pricing Reference",
+        "🧾 Session Cost",
     ])
 
     with tab1:
@@ -1176,6 +1362,8 @@ def main():
         tab_rag()
     with tab5:
         tab_reference()
+    with tab6:
+        tab_session_cost()
 
 
 if __name__ == "__main__":

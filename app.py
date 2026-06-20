@@ -1,15 +1,24 @@
 """
 AI Token Cost Explorer — Streamlit App
-• Tab 1 & 2: Live Anthropic API calls (needs ANTHROPIC_API_KEY)
-• Tab 3 & 4: Pure cost math — all providers, no extra API keys required
+• Tab 1 & 2: Live Anthropic API calls (needs ANTHROPIC_API_KEY in .env)
+• Tab 3, 4, 5: Pure cost math — all providers, no API keys required
 """
 
 import json
+import os
 import anthropic
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from dotenv import load_dotenv
+
+# Load .env file if present (falls back to environment variables if not)
+load_dotenv()
+
+# ── Model selection from .env (override defaults here or in .env) ─────────────
+CODE_WRITER_MODEL = os.getenv("CODE_WRITER_MODEL", "claude-sonnet-4-6")
+CHAT_DEFAULT_MODEL = os.getenv("CHAT_DEFAULT_MODEL", "claude-sonnet-4-6")
 
 # ── Model pricing config (USD per 1M tokens, June 2025) ──────────────────────
 # No API keys needed for tabs 3 & 4 — purely mathematical comparisons.
@@ -293,7 +302,7 @@ def run_code_writer(task: str):
 
     # Count tokens before the call
     count_resp = client.messages.count_tokens(
-        model="claude-sonnet-4-6",
+        model=CODE_WRITER_MODEL,
         system=system,
         tools=MOCK_MCP_TOOLS,
         messages=messages,
@@ -306,7 +315,7 @@ def run_code_writer(task: str):
     tool_calls_made = []
 
     with client.messages.stream(
-        model="claude-sonnet-4-6",
+        model=CODE_WRITER_MODEL,
         max_tokens=4096,
         thinking={"type": "adaptive"},
         system=system,
@@ -340,9 +349,9 @@ def run_code_writer(task: str):
     input_tokens = usage.input_tokens
     output_tokens = usage.output_tokens
 
-    input_cost = token_cost(input_tokens, MODEL_PRICING["claude-sonnet-4-6"]["input"])
-    output_cost = token_cost(output_tokens, MODEL_PRICING["claude-sonnet-4-6"]["output"])
-    tool_cost = token_cost(tool_tokens, MODEL_PRICING["claude-sonnet-4-6"]["input"])
+    input_cost = token_cost(input_tokens, MODEL_PRICING[CODE_WRITER_MODEL]["input"])
+    output_cost = token_cost(output_tokens, MODEL_PRICING[CODE_WRITER_MODEL]["output"])
+    tool_cost = token_cost(tool_tokens, MODEL_PRICING[CODE_WRITER_MODEL]["input"])
 
     yield {
         "type": "done",
@@ -363,8 +372,9 @@ def run_code_writer(task: str):
 def tab_code_writer():
     st.header("💻 Code Writer")
     st.caption(
-        "Requires **ANTHROPIC_API_KEY**. Claude Sonnet 4.6 writes code with "
-        "adaptive thinking + MCP tool simulation."
+        f"Requires **ANTHROPIC_API_KEY**. Using **{MODEL_PRICING.get(CODE_WRITER_MODEL, {}).get('name', CODE_WRITER_MODEL)}** "
+        f"(`{CODE_WRITER_MODEL}`) with adaptive thinking + MCP tool simulation. "
+        f"Change model via `CODE_WRITER_MODEL` in `.env`."
     )
     st.info("🔑 Only Anthropic API key needed here — comparison tabs work without any keys.", icon="ℹ️")
 
@@ -459,9 +469,12 @@ def tab_chatbot():
     st.caption("Requires **ANTHROPIC_API_KEY**. Live chat with real-time context window monitoring.")
     st.info("🔑 Only Anthropic API key needed here — comparison tabs work without any keys.", icon="ℹ️")
 
+    _chat_options = ["claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-8"]
+    _chat_default = CHAT_DEFAULT_MODEL if CHAT_DEFAULT_MODEL in _chat_options else "claude-sonnet-4-6"
     model = st.sidebar.selectbox(
         "Chat Model",
-        options=["claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-8"],
+        options=_chat_options,
+        index=_chat_options.index(_chat_default),
         format_func=lambda k: MODEL_PRICING[k]["name"],
         key="chat_model",
     )

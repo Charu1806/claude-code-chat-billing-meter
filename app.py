@@ -710,13 +710,36 @@ def tab_code_writer(model_key: str):
         st.error(f"❌ `{info['key_env']}` is not set. Add it to your `.env` file.", icon="🔑")
         return
 
-    # Session state init — reset if model changed
-    if ("cw_messages" not in st.session_state
-            or st.session_state.get("cw_model_key") != model_key):
+    # Session state init
+    if "cw_messages" not in st.session_state:
         st.session_state.cw_messages = []
         st.session_state.cw_turn_data = []
         st.session_state.cw_cumulative_cost = 0.0
         st.session_state.cw_model_key = model_key
+
+    # Model switched — ask what to do instead of silently resetting
+    prev_model = st.session_state.get("cw_model_key", model_key)
+    if prev_model != model_key and st.session_state.cw_messages:
+        prev_label = LIVE_MODELS.get(prev_model, {}).get("label", prev_model)
+        st.warning(
+            f"⚠️ You switched from **{prev_label}** to **{info['label']}**. "
+            f"What would you like to do with the existing conversation?",
+            icon="🔄",
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("🗑️ Clear & start fresh", type="primary", use_container_width=True):
+            st.session_state.cw_messages = []
+            st.session_state.cw_turn_data = []
+            st.session_state.cw_cumulative_cost = 0.0
+            st.session_state.cw_model_key = model_key
+            st.rerun()
+        if c2.button("📋 Keep history, switch model", use_container_width=True):
+            # Keep messages, just update the model key and cost tracking
+            st.session_state.cw_model_key = model_key
+            st.rerun()
+        return   # don't render the chat until user decides
+
+    st.session_state.cw_model_key = model_key
 
     # ── Render conversation history ───────────────────────────────────────────
     for i, msg in enumerate(st.session_state.cw_messages):
@@ -808,13 +831,39 @@ def tab_chatbot(model_key: str):
         st.error(f"❌ `{info['key_env']}` is not set. Add it to your `.env` file.", icon="🔑")
         return
 
-    if "chat_messages" not in st.session_state or st.session_state.get("chat_model_key") != model_key:
+    if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = []
         st.session_state.chat_total_input_tokens = 0
         st.session_state.chat_total_output_tokens = 0
         st.session_state.chat_total_cost = 0.0
         st.session_state.chat_per_turn = []
         st.session_state.chat_model_key = model_key
+
+    prev_chat_model = st.session_state.get("chat_model_key", model_key)
+    if prev_chat_model != model_key and st.session_state.chat_messages:
+        prev_label = LIVE_MODELS.get(prev_chat_model, {}).get("label", prev_chat_model)
+        st.warning(
+            f"⚠️ You switched from **{prev_label}** to **{info['label']}**. "
+            f"What would you like to do with the existing conversation?",
+            icon="🔄",
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("🗑️ Clear & start fresh", type="primary",
+                     use_container_width=True, key="chat_clear_switch"):
+            st.session_state.chat_messages = []
+            st.session_state.chat_total_input_tokens = 0
+            st.session_state.chat_total_output_tokens = 0
+            st.session_state.chat_total_cost = 0.0
+            st.session_state.chat_per_turn = []
+            st.session_state.chat_model_key = model_key
+            st.rerun()
+        if c2.button("📋 Keep history, switch model",
+                     use_container_width=True, key="chat_keep_switch"):
+            st.session_state.chat_model_key = model_key
+            st.rerun()
+        return
+
+    st.session_state.chat_model_key = model_key
 
     for i, msg in enumerate(st.session_state.chat_messages):
         with st.chat_message(msg["role"]):

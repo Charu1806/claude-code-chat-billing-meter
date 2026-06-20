@@ -476,7 +476,7 @@ def stream_openai_compat(model_key: str, messages: list):
 
     # Fallback token estimate if provider didn't return usage in stream
     if in_tok == 0:
-        in_tok = len(task.split()) * 2
+        in_tok = sum(len(m["content"].split()) * 2 for m in messages)
     if out_tok == 0:
         out_tok = len(full_text.split()) * 2
 

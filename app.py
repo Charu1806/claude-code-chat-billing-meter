@@ -496,6 +496,129 @@ def count_tokens_anthropic(model_key: str, messages: list) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Receipt renderer
+# ─────────────────────────────────────────────────────────────────────────────
+
+TOOL_EXPLANATIONS = {
+    "read_file":      ("📄 Read File",      "Claude wanted to read an existing source file for context before writing code."),
+    "search_docs":    ("🔍 Search Docs",    "Claude searched for documentation examples relevant to your task."),
+    "list_directory": ("📁 List Directory", "Claude listed project files to understand the codebase structure."),
+}
+
+def render_receipt(d: dict, iteration: int, cumulative: float, model_info: dict):
+    """Render a billing receipt for a single code writer call."""
+    import datetime
+    model_key = d["model_key"]
+    pricing = MODEL_PRICING.get(model_key, {"input": 0, "output": 0})
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    st.markdown("---")
+    st.markdown("### 🧾 Billing Receipt")
+
+    # ── Receipt card ──────────────────────────────────────────────────────────
+    st.markdown(f"""
+<div style="border:1px solid #ddd;border-radius:10px;padding:20px;font-family:monospace;background:#fafafa">
+<div style="display:flex;justify-content:space-between;border-bottom:1px dashed #ccc;padding-bottom:8px;margin-bottom:12px">
+  <span style="font-size:1.1em;font-weight:700">AI Token Cost Explorer</span>
+  <span style="color:#888;font-size:0.85em">{timestamp}</span>
+</div>
+<div style="color:#555;margin-bottom:12px;font-size:0.85em">
+  Model: <b>{model_info['label']}</b> &nbsp;·&nbsp; Provider: <b>{model_info['provider']}</b><br>
+  Rate: ${pricing['input']:.2f} / 1M input &nbsp;·&nbsp; ${pricing['output']:.2f} / 1M output
+</div>
+
+<table style="width:100%;border-collapse:collapse;font-size:0.9em">
+  <tr style="border-bottom:1px solid #eee">
+    <th style="text-align:left;padding:6px 4px;color:#333">Line Item</th>
+    <th style="text-align:right;padding:6px 4px;color:#333">Tokens</th>
+    <th style="text-align:right;padding:6px 4px;color:#333">Rate $/1M</th>
+    <th style="text-align:right;padding:6px 4px;color:#333">Cost</th>
+  </tr>
+  <tr>
+    <td style="padding:6px 4px">📥 Input tokens<br><span style="color:#888;font-size:0.8em">Your prompt + system + tool schemas</span></td>
+    <td style="text-align:right;padding:6px 4px">{d['input_tokens']:,}</td>
+    <td style="text-align:right;padding:6px 4px">${pricing['input']:.2f}</td>
+    <td style="text-align:right;padding:6px 4px">{fmt_cost(d['input_cost'])}</td>
+  </tr>
+  <tr style="background:#f5f5f5">
+    <td style="padding:6px 4px">📤 Output tokens<br><span style="color:#888;font-size:0.8em">Generated code + explanation</span></td>
+    <td style="text-align:right;padding:6px 4px">{d['output_tokens']:,}</td>
+    <td style="text-align:right;padding:6px 4px">${pricing['output']:.2f}</td>
+    <td style="text-align:right;padding:6px 4px">{fmt_cost(d['output_cost'])}</td>
+  </tr>
+  <tr>
+    <td style="padding:6px 4px">🧠 Reasoning tokens<br><span style="color:#888;font-size:0.8em">Claude's internal thinking (Claude only)</span></td>
+    <td style="text-align:right;padding:6px 4px">{d['thinking_tokens']:,}</td>
+    <td style="text-align:right;padding:6px 4px">${pricing['input']:.2f}</td>
+    <td style="text-align:right;padding:6px 4px">{fmt_cost(token_cost(d['thinking_tokens'], pricing['input']))}</td>
+  </tr>
+  <tr style="background:#f5f5f5">
+    <td style="padding:6px 4px">🔧 Tool use tokens<br><span style="color:#888;font-size:0.8em">MCP call JSON + mock responses</span></td>
+    <td style="text-align:right;padding:6px 4px">{d['tool_tokens']:,}</td>
+    <td style="text-align:right;padding:6px 4px">${pricing['input']:.2f}</td>
+    <td style="text-align:right;padding:6px 4px">{fmt_cost(d['tool_cost'])}</td>
+  </tr>
+  <tr style="border-top:2px solid #333;font-weight:700">
+    <td style="padding:8px 4px">TOTAL — This Request</td>
+    <td style="text-align:right;padding:8px 4px">{d['input_tokens'] + d['output_tokens'] + d['thinking_tokens'] + d['tool_tokens']:,}</td>
+    <td></td>
+    <td style="text-align:right;padding:8px 4px">{fmt_cost(d['total_cost'])}</td>
+  </tr>
+  <tr style="color:#e07b39;font-weight:700">
+    <td style="padding:4px 4px">🏦 Cumulative ({iteration} iteration{"s" if iteration > 1 else ""})</td>
+    <td></td>
+    <td></td>
+    <td style="text-align:right;padding:4px 4px">{fmt_cost(cumulative)}</td>
+  </tr>
+</table>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Tool call explanation ─────────────────────────────────────────────────
+    if d["tools_called"]:
+        st.markdown("#### 🔧 Why Claude Used Tools")
+        st.caption(
+            "Tools let Claude gather context before writing — like a developer "
+            "searching docs or reading files first. Each call adds token overhead."
+        )
+        unique_tools = list(dict.fromkeys(d["tools_called"]))  # preserve order, dedupe
+        for tool_name in unique_tools:
+            count = d["tools_called"].count(tool_name)
+            emoji_label, reason = TOOL_EXPLANATIONS.get(
+                tool_name, ("🔧 " + tool_name, "Claude decided this tool was useful.")
+            )
+            times = f" (called {count}×)" if count > 1 else ""
+            with st.expander(f"{emoji_label}{times}", expanded=True):
+                st.write(f"**Why:** {reason}")
+                st.write(f"**Token cost:** ~{50 * count} tokens "
+                         f"({fmt_cost(token_cost(50 * count, pricing['input']))})"
+                         f" — the call JSON + mock response payload")
+                st.caption("In a real MCP setup this would call an actual filesystem or database.")
+
+    # ── Charts ────────────────────────────────────────────────────────────────
+    col_a, col_b = st.columns(2)
+    with col_a:
+        labels = ["📥 Input", "📤 Output", "🧠 Reasoning", "🔧 Tools"]
+        values = [d["input_cost"], d["output_cost"],
+                  token_cost(d["thinking_tokens"], pricing["input"]),
+                  max(d["tool_cost"], 1e-9)]
+        fig = px.pie(names=labels, values=values, title="Cost Distribution")
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_b:
+        tok_labels = ["📥 Input", "📤 Output", "🧠 Reasoning", "🔧 Tools"]
+        tok_values = [d["input_tokens"], d["output_tokens"],
+                      d["thinking_tokens"], d["tool_tokens"]]
+        fig2 = px.bar(x=tok_labels, y=tok_values, title="Token Count by Category",
+                      labels={"x": "", "y": "Tokens"},
+                      color=tok_labels,
+                      color_discrete_sequence=["#4C78A8","#72B7B2","#F58518","#E45756"])
+        fig2.update_layout(showlegend=False)
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — Code Writer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -572,35 +695,8 @@ def tab_code_writer(model_key: str):
             st.session_state.cw_cumulative_cost += final_data["total_cost"]
             st.session_state.cw_history.append(final_data)
 
-            st.markdown("### 📊 Token Breakdown")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("🧠 Reasoning", f"{final_data['thinking_tokens']:,}",
-                      help="Only populated for Claude with adaptive thinking")
-            c2.metric("📥 Input",   f"{final_data['input_tokens']:,}")
-            c3.metric("📤 Output",  f"{final_data['output_tokens']:,}")
-            c4.metric("🔧 Tool Use",f"{final_data['tool_tokens']:,}")
-
-            st.markdown("### 💰 Cost Breakdown")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Input Cost",    fmt_cost(final_data["input_cost"]))
-            c2.metric("Output Cost",   fmt_cost(final_data["output_cost"]))
-            c3.metric("Tool Cost",     fmt_cost(final_data["tool_cost"]))
-            c4.metric("This Request",  fmt_cost(final_data["total_cost"]))
-
-            st.metric(
-                f"🏦 Cumulative Cost ({st.session_state.cw_iterations} iterations)",
-                fmt_cost(st.session_state.cw_cumulative_cost),
-                delta=fmt_cost(final_data["total_cost"]),
-            )
-
-            if final_data["tools_called"]:
-                st.info(f"🔧 Tools called: {', '.join(final_data['tools_called'])}")
-
-            labels = ["Input", "Output", "Tool Use"]
-            values = [final_data["input_cost"], final_data["output_cost"], max(final_data["tool_cost"], 1e-9)]
-            fig = px.pie(names=labels, values=values, title="Cost Distribution")
-            fig.update_traces(textposition="inside", textinfo="percent+label")
-            st.plotly_chart(fig, use_container_width=True)
+            render_receipt(final_data, st.session_state.cw_iterations,
+                           st.session_state.cw_cumulative_cost, info)
 
             if len(st.session_state.cw_history) > 1:
                 st.markdown("### 📈 Cumulative Cost Over Iterations")
@@ -608,8 +704,8 @@ def tab_code_writer(model_key: str):
                 for i, h in enumerate(st.session_state.cw_history, 1):
                     running += h["total_cost"]
                     cum.append({"Iteration": i, "Cumulative Cost ($)": running})
-                fig2 = px.line(pd.DataFrame(cum), x="Iteration", y="Cumulative Cost ($)", markers=True)
-                st.plotly_chart(fig2, use_container_width=True)
+                fig3 = px.line(pd.DataFrame(cum), x="Iteration", y="Cumulative Cost ($)", markers=True)
+                st.plotly_chart(fig3, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
